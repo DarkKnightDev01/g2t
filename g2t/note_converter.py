@@ -9,6 +9,11 @@ A4_MIDI = 69
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F',
               'F#', 'G', 'G#', 'A', 'A#', 'B']
 
+FLAT_TO_SHARP = {
+    'Db': 'C#', 'Eb': 'D#', 'Fb': 'E', 'Gb': 'F#',
+    'Ab': 'G#', 'Bb': 'A#', 'Cb': 'B',
+}
+
 
 def freq_to_midi(frequency):
     """Convert frequency in Hz to the nearest MIDI note number.
@@ -92,12 +97,8 @@ def note_name_to_midi(note_name):
     octave_str = note_name[-1] if note_name[-1].isdigit() else None
 
     # Handle flats by converting to sharps
-    flat_to_sharp = {
-        'Db': 'C#', 'Eb': 'D#', 'Fb': 'E', 'Gb': 'F#',
-        'Ab': 'G#', 'Bb': 'A#', 'Cb': 'B',
-    }
-    if name in flat_to_sharp:
-        name = flat_to_sharp[name]
+    if name in FLAT_TO_SHARP:
+        name = FLAT_TO_SHARP[name]
 
     if name not in NOTE_NAMES:
         raise ValueError(f"Unknown note name: {name}")

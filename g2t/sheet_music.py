@@ -2,6 +2,9 @@
 
 import music21
 
+# Standard note durations in quarter-note lengths
+STANDARD_DURATIONS = [4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.25]
+
 
 def notes_to_stream(notes, tempo=120.0):
     """Convert detected notes to a music21 Stream.
@@ -62,8 +65,7 @@ def _quantize_duration(duration_beats):
     Returns:
         Quantized duration in quarter lengths.
     """
-    standard = [4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.25]
-    best = min(standard, key=lambda s: abs(s - duration_beats))
+    best = min(STANDARD_DURATIONS, key=lambda s: abs(s - duration_beats))
     return best
 
 
