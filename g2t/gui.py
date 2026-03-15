@@ -7,12 +7,14 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 from g2t.audio_loader import load_audio, normalize_audio, trim_silence
 from g2t.pitch_detector import (
-    detect_pitches, detect_onsets, estimate_tempo, segment_notes
+    detect_pitches, detect_onsets, estimate_tempo, segment_notes,
+    separate_harmonic,
 )
 from g2t.note_converter import quantize_notes
 from g2t.guitar_tab import notes_to_tab
 from g2t.midi_generator import create_midi_file
 from g2t.sheet_music import create_sheet_music
+from g2t.player import MidiPlayer, ALL_EXTENSIONS, GP_EXTENSIONS, MIDI_EXTENSIONS
 
 
 class G2TApp:
@@ -32,7 +34,23 @@ class G2TApp:
         self.detected_notes = []
         self.detected_tempo = 120.0
 
+        # Player state
+        self._player = MidiPlayer(on_stop=self._on_playback_stopped)
+        self._player_path = tk.StringVar()
+        self._player_pos_var = tk.StringVar(value="0:00")
+        self._player_poll_id = None
+
         self._build_ui()
+
+    def _on_close(self):
+        """Clean up player resources before closing the window."""
+        if self._player_poll_id is not None:
+            try:
+                self.root.after_cancel(self._player_poll_id)
+            except Exception:
+                pass
+        self._player.close()
+        self.root.destroy()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -131,12 +149,77 @@ class G2TApp:
         )
         self.info_text.pack(fill=tk.BOTH, expand=True)
 
+        # Tab: Player
+        player_frame = ttk.Frame(nb)
+        nb.add(player_frame, text="Player")
+        self._build_player_tab(player_frame)
+
         # Status bar
         status_bar = ttk.Label(
             self.root, textvariable=self.status_var, relief=tk.SUNKEN,
             anchor=tk.W, padding=3
         )
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _build_player_tab(self, parent):
+        """Build the interactive MIDI / Guitar Pro player UI."""
+        outer = ttk.LabelFrame(parent, text="MIDI / Guitar Pro Player",
+                               padding=12)
+        outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # File row
+        file_row = ttk.Frame(outer)
+        file_row.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(file_row, text="File:").pack(side=tk.LEFT)
+        ttk.Entry(file_row, textvariable=self._player_path,
+                  width=55).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(file_row, text="Browse…",
+                   command=self._player_browse).pack(side=tk.LEFT)
+        ttk.Button(file_row, text="Load",
+                   command=self._player_load).pack(side=tk.LEFT, padx=(4, 0))
+
+        # Controls row
+        ctrl_row = ttk.Frame(outer)
+        ctrl_row.pack(pady=4)
+
+        self._play_btn = ttk.Button(ctrl_row, text="▶  Play",
+                                    command=self._player_play, width=10)
+        self._play_btn.pack(side=tk.LEFT, padx=4)
+
+        self._pause_btn = ttk.Button(ctrl_row, text="⏸  Pause",
+                                     command=self._player_pause, width=10,
+                                     state=tk.DISABLED)
+        self._pause_btn.pack(side=tk.LEFT, padx=4)
+
+        self._stop_btn = ttk.Button(ctrl_row, text="⏹  Stop",
+                                    command=self._player_stop, width=10,
+                                    state=tk.DISABLED)
+        self._stop_btn.pack(side=tk.LEFT, padx=4)
+
+        # Volume
+        vol_row = ttk.Frame(outer)
+        vol_row.pack(pady=4)
+        ttk.Label(vol_row, text="Volume:").pack(side=tk.LEFT)
+        self._vol_var = tk.DoubleVar(value=1.0)
+        vol_slider = ttk.Scale(vol_row, from_=0.0, to=1.0,
+                               orient=tk.HORIZONTAL, length=150,
+                               variable=self._vol_var,
+                               command=self._player_set_volume)
+        vol_slider.pack(side=tk.LEFT, padx=6)
+
+        # Position label
+        pos_row = ttk.Frame(outer)
+        pos_row.pack(pady=2)
+        ttk.Label(pos_row, text="Position:").pack(side=tk.LEFT)
+        ttk.Label(pos_row, textvariable=self._player_pos_var,
+                  font=("Courier", 10)).pack(side=tk.LEFT, padx=6)
+
+        # Status label
+        self._player_status_var = tk.StringVar(value="No file loaded.")
+        ttk.Label(outer, textvariable=self._player_status_var,
+                  foreground="#555555").pack(pady=(8, 0))
 
     # -------------------------------------------------------------- Actions
     def _browse_file(self):
@@ -178,9 +261,18 @@ class G2TApp:
             else:
                 fmin, fmax = 50.0, 2000.0
 
-            self._log_status("Detecting pitches (pYIN)…")
-            f0, voiced, probs = detect_pitches(y, sr, fmin=fmin, fmax=fmax)
+            # Separate harmonic content to improve pitch detection accuracy.
+            # The harmonic component contains sustained tones while transients
+            # (pick attacks, drum hits) go to the percussive component.
+            self._log_status("Separating harmonic content…")
+            y_harmonic = separate_harmonic(y)
 
+            self._log_status("Detecting pitches (pYIN)…")
+            f0, voiced, probs = detect_pitches(y_harmonic, sr,
+                                               fmin=fmin, fmax=fmax)
+
+            # Detect onsets on the original (full) signal so that transients
+            # are still captured for note boundary placement.
             self._log_status("Detecting onsets…")
             onsets = detect_onsets(y, sr)
 
@@ -196,7 +288,8 @@ class G2TApp:
                     self.detected_tempo = 120.0
 
             self._log_status("Segmenting notes…")
-            raw_notes = segment_notes(f0, voiced, onsets, sr)
+            raw_notes = segment_notes(f0, voiced, onsets, sr,
+                                      voiced_probs=probs)
 
             self._log_status("Quantizing to semitones…")
             self.detected_notes = quantize_notes(raw_notes)
@@ -309,6 +402,94 @@ class G2TApp:
             self.detected_notes, path, tempo=self.detected_tempo
         )
         self.status_var.set(f"Sheet music saved to {path}")
+
+    # ------------------------------------------------------------ Player
+    def _player_browse(self):
+        ext_list = " ".join(f"*{e}" for e in sorted(ALL_EXTENSIONS))
+        path = filedialog.askopenfilename(
+            title="Select MIDI or Guitar Pro file",
+            filetypes=[
+                ("MIDI / Guitar Pro files", ext_list),
+                ("MIDI files", "*.mid *.midi"),
+                ("Guitar Pro files", "*.gp *.gp3 *.gp4 *.gp5 *.gpx *.gp7"),
+                ("All files", "*.*"),
+            ]
+        )
+        if path:
+            self._player_path.set(path)
+
+    def _player_load(self):
+        path = self._player_path.get().strip()
+        if not path or not os.path.isfile(path):
+            messagebox.showerror("Player Error",
+                                 "Please select a valid MIDI or GP file.")
+            return
+        try:
+            self._player.load(path)
+            fname = os.path.basename(path)
+            self._player_status_var.set(f"Loaded: {fname}")
+            self._play_btn.config(state=tk.NORMAL)
+            self._pause_btn.config(state=tk.DISABLED)
+            self._stop_btn.config(state=tk.DISABLED)
+            self._player_pos_var.set("0:00")
+        except Exception as exc:
+            messagebox.showerror("Player Error", str(exc))
+
+    def _player_play(self):
+        try:
+            self._player.play()
+            self._player_status_var.set("Playing…")
+            self._pause_btn.config(state=tk.NORMAL)
+            self._stop_btn.config(state=tk.NORMAL)
+            self._play_btn.config(text="↺  Restart")
+            self._poll_player_position()
+        except Exception as exc:
+            messagebox.showerror("Player Error", str(exc))
+
+    def _player_pause(self):
+        if self._player.is_paused():
+            self._player.resume()
+            self._player_status_var.set("Playing…")
+            self._pause_btn.config(text="⏸  Pause")
+            self._poll_player_position()
+        else:
+            self._player.pause()
+            self._player_status_var.set("Paused.")
+            self._pause_btn.config(text="▶  Resume")
+
+    def _player_stop(self):
+        self._player.stop()
+        self._player_status_var.set("Stopped.")
+        self._play_btn.config(text="▶  Play")
+        self._pause_btn.config(state=tk.DISABLED, text="⏸  Pause")
+        self._stop_btn.config(state=tk.DISABLED)
+        self._player_pos_var.set("0:00")
+        if self._player_poll_id is not None:
+            self.root.after_cancel(self._player_poll_id)
+            self._player_poll_id = None
+
+    def _on_playback_stopped(self):
+        """Called from the MidiPlayer background thread when playback ends."""
+        self.root.after(0, self._player_stop)
+
+    def _poll_player_position(self):
+        """Update the position label while the player is active."""
+        if self._player_poll_id is not None:
+            self.root.after_cancel(self._player_poll_id)
+        if self._player.is_playing():
+            secs = self._player.get_position()
+            mins = int(secs) // 60
+            sec = int(secs) % 60
+            self._player_pos_var.set(f"{mins}:{sec:02d}")
+            self._player_poll_id = self.root.after(250, self._poll_player_position)
+        else:
+            self._player_poll_id = None
+
+    def _player_set_volume(self, value):
+        try:
+            self._player.set_volume(float(value))
+        except Exception:
+            pass
 
 
 def main():
